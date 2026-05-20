@@ -67,18 +67,18 @@ async function run() {
     app.get('/appointment', async (req, res) => {
       const { search } = req.query;
 
-      let cursor;
-      if(search){
-         cursor = appointmentCollection.find({name: search });
+      // let cursor;
+      // if(search){
+      //    cursor = appointmentCollection.find({name: search });
 
-      }else {
-        cursor = appointmentCollection.find();
-      }
+      // }else {
+      //   cursor = appointmentCollection.find();
+      // }
 
 
       const cursor = appointmentCollection.find();
       const result = await cursor.toArray();
-      console.log(result);
+      
       //console.log(result);
       res.send(result)  
     });
