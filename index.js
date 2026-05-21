@@ -1,119 +1,230 @@
-const express = require('express');
-const dotenv = require('dotenv')
+const express = require("express");
+const dotenv = require("dotenv");
+const cors = require("cors");
+const cookieParser = require("cookie-parser");
+const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+
+dotenv.config();
+
 const app = express();
-const cors = require('cors');
-const { createRemoteJWKSet, jwtVerify } = require('jose-cjs');
-const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb'); 
-dotenv.config()
+const port = process.env.PORT || 5000;
 
-const port = process.env.PORT;   
+/* ================= MIDDLEWARE ================= */
 
-app.use(cors());
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL,
+    credentials: true, // 🔥 VERY IMPORTANT
+  })
+);
+
 app.use(express.json());
+app.use(cookieParser()); // 🔥 FIX
+
+/* ================= MONGODB ================= */
 
 const uri = process.env.MONGODB_URI;
-
-
-const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
-
-
 
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
     strict: true,
     deprecationErrors: true,
-  }
+  },
 });
 
-const logger =  (req, res, next) => {
-console.log(req.params, 'from second');
-console.log(`${req.method} | ${req.url}`);
-next();
-        };
+/* ================= LOGGER ================= */
+ 
+const logger = (req, res, next) => {
+  console.log(`${req.method} | ${req.url}`);
+  next();
+};
 
-    const verifyToken = async (req, res, next)=> {
-      const { authorization } = req.headers;
-      // console.log(req.headers, 'from verify token'); 
-      const token = authorization?.split(' ') [1];
-      //console.log(token);
+/* ================= AUTH MIDDLEWARE (FIXED) ================= */
 
-  if (!token) {
-    return res.status(401).json({ message: 'Unauthorize' });
-  }
-
+const verifyToken = async (req, res, next) => {
   try {
-    const JWKS = createRemoteJWKSet(new URL('http://localhost:3000/api/auth/jwks'));
+    // 🔥 COOKIE FIRST (PRIMARY)
+    const token =
+      req.cookies?.token ||
+      req.headers.authorization?.split(" ")[1];
+
+    if (!token) {
+      return res.status(401).send({
+        success: false,
+        message: "Unauthorized Access",
+      });
+    }
+
+    const JWKS = createRemoteJWKSet(
+      new URL(`${process.env.CLIENT_URL}/api/auth/jwks`)
+    );
+
     const { payload } = await jwtVerify(token, JWKS);
+
     req.user = payload;
 
     next();
   } catch (error) {
-    console.error('Token validation failed:', error);
-    return res.status(401).json({ message: 'Unauthorize' });
+    return res.status(401).send({
+      success: false,
+      message: "Invalid Token",
+    });
   }
 };
 
+/* ================= RUN ================= */
 
-
-
-async function run() { 
+async function run() {
   try {
-    //await client.connect();  
+    const db = client.db("docappointdb");
 
-    const db = client.db('docappointdb');
-    const appointmentCollection = db.collection('appointment');
+    const appointmentCollection = db.collection("appointment");
+    const bookingCollection = db.collection("bookings");
+    const reviewCollection = db.collection("reviews");
 
-    app.get('/appointment', async (req, res) => {
+    /* ================= GET ALL DOCTORS ================= */
+
+    app.get("/appointment", async (req, res) => {
       const { search } = req.query;
 
-      // let cursor;
-      // if(search){
-      //    cursor = appointmentCollection.find({name: search });
+      let query = {};
 
-      // }else {
-      //   cursor = appointmentCollection.find();
-      // }
+      if (search) {
+        query = {
+          name: { $regex: search, $options: "i" },
+        };
+      }
 
-
-      const cursor = appointmentCollection.find();
-      const result = await cursor.toArray();
-      
-      //console.log(result);
-      res.send(result)  
+      const result = await appointmentCollection.find(query).toArray();
+      res.send(result);
     });
 
-    app.get('/featured', async (req, res) => {
-      const cursor = appointmentCollection.find().limit(3); 
-      const result = await cursor.toArray();
-        res.send(result)  
-    }); 
+    /* ================= FEATURED ================= */
 
-       app.get('/appointment/:appintId',
-        logger, verifyToken, async (req, res) => {
-        
+    app.get("/featured", async (req, res) => {
+      const result = await appointmentCollection
+        .find()
+        .sort({ rating: -1 })
+        .limit(3)
+        .toArray();
 
-        const { appintId } = req.params;
-        const query = {_id: new ObjectId(appintId)};
-       const result = await appointmentCollection.findOne(query);
-       res.send(result)  
-      
+      res.send(result);
     });
 
-    await client.db("admin").command({ ping: 1 }); 
+    /* ================= SINGLE DOCTOR (PROTECTED) ================= */
 
-    console.log("Connected to MongoDB");
-  } catch (error) {
-    console.log(error);
+    app.get(
+      "/appointment/:appointmentId",
+      logger,
+      verifyToken,
+      async (req, res) => {
+        try {
+          const { appointmentId } = req.params;
+
+          const result = await appointmentCollection.findOne({
+            _id: new ObjectId(appointmentId),
+          });
+
+          if (!result) {
+            return res.status(404).send({
+              success: false,
+              message: "Doctor not found",
+            });
+          }
+
+          res.send(result);
+        } catch (error) {
+          res.status(500).send({
+            success: false,
+            message: "Failed to fetch doctor",
+          });
+        }
+      }
+    );
+
+    /* ================= BOOK APPOINTMENT ================= */
+
+    app.post("/bookings", verifyToken, async (req, res) => {
+      const result = await bookingCollection.insertOne({
+        ...req.body,
+        createdAt: new Date(),
+      });
+
+      res.send(result);
+    });
+
+    /* ================= GET USER BOOKINGS ================= */
+
+    app.get("/bookings/:email", verifyToken, async (req, res) => {
+      const result = await bookingCollection
+        .find({ userEmail: req.params.email })
+        .toArray();
+
+      res.send(result);
+    });
+
+    /* ================= UPDATE BOOKING ================= */
+
+    app.patch("/bookings/:id", verifyToken, async (req, res) => {
+      const result = await bookingCollection.updateOne(
+        { _id: new ObjectId(req.params.id) },
+        {
+          $set: req.body,
+        }
+      );
+
+      res.send(result);
+    });
+
+    /* ================= DELETE BOOKING ================= */
+
+    app.delete("/bookings/:id", verifyToken, async (req, res) => {
+      const result = await bookingCollection.deleteOne({
+        _id: new ObjectId(req.params.id),
+      });
+
+      res.send(result);
+    });
+
+    /* ================= REVIEWS ================= */
+
+    app.post("/reviews", verifyToken, async (req, res) => {
+      const result = await reviewCollection.insertOne({
+        ...req.body,
+        createdAt: new Date(),
+      });
+
+      res.send(result);
+    });
+
+    app.get("/reviews/:doctorName", async (req, res) => {
+      const result = await reviewCollection
+        .find({ doctorName: req.params.doctorName })
+        .toArray();
+
+      res.send(result);
+    });
+
+    /* ================= ROOT ================= */
+
+    app.get("/", (req, res) => {
+      res.send("DocAppoint Server Running");
+    });
+
+    await client.db("admin").command({ ping: 1 });
+
+    console.log("MongoDB Connected Successfully");
+  } catch (err) {
+    console.log(err);
   }
 }
 
 run();
 
-app.get('/', (req, res) => {
-  res.send('docappoint server is serving');
-});
+/* ================= SERVER ================= */
 
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+  console.log(`Server running on port ${port}`);  
+});   
